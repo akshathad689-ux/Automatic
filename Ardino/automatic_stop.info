@@ -1,0 +1,297 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// ================= MOTOR =================
+#define MOTOR_LEFT  D0
+#define MOTOR_RIGHT D4
+
+// ================= POTENTIOMETER =================
+#define POT_PIN A0
+
+// ================= PUSH BUTTON =================
+#define BUTTON_PIN D3
+
+// ================= RFID =================
+#define SS_PIN  D2
+#define RST_PIN D1
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// ================= WIFI =================
+const char* ssid = "Redmi 14C 5G";
+const char* password = "hithesh#123";
+
+// ================= SERVER =================
+const char* serverURL = "http://10.54.105.116:5000/data";
+
+// Point number
+int pointNumber = 1;
+
+// Stop at RFID point for 3 seconds
+const unsigned long STOP_TIME = 3000;
+
+// Car state
+bool carRunning = false;
+
+// Button state
+bool lastButtonState = HIGH;
+
+
+// ================= CAR FORWARD =================
+void carForward()
+{
+  int potValue = analogRead(POT_PIN);
+
+  // Convert potentiometer value to PWM
+  int speedPWM = map(potValue, 0, 1023, 0, 1023);
+
+  analogWrite(MOTOR_LEFT, speedPWM);
+  analogWrite(MOTOR_RIGHT, speedPWM);
+
+  Serial.print("CAR MOVING - PWM: ");
+  Serial.println(speedPWM);
+}
+
+
+// ================= CAR STOP =================
+void carStop()
+{
+  analogWrite(MOTOR_LEFT, 0);
+  analogWrite(MOTOR_RIGHT, 0);
+
+  Serial.println("CAR STOPPED");
+}
+
+
+// ================= GET UID =================
+String getUID()
+{
+  String uid = "";
+
+  for (byte i = 0; i < rfid.uid.size; i++)
+  {
+    if (rfid.uid.uidByte[i] < 0x10)
+    {
+      uid += "0";
+    }
+
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uid.toUpperCase();
+
+  return uid;
+}
+
+
+// ================= SEND TO SERVER =================
+void sendData(String uid, int point)
+{
+  Serial.println("Sending data to server...");
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("WiFi NOT connected!");
+    return;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+
+  String url = String(serverURL);
+  url += "?point=";
+  url += String(point);
+  url += "&uid=";
+  url += uid;
+
+  Serial.print("URL: ");
+  Serial.println(url);
+
+  http.begin(client, url);
+
+  int httpCode = http.GET();
+
+  Serial.print("Server response code: ");
+  Serial.println(httpCode);
+
+  if (httpCode > 0)
+  {
+    Serial.println("DATA SENT SUCCESSFULLY");
+  }
+  else
+  {
+    Serial.println("FAILED TO SEND DATA");
+  }
+
+  http.end();
+}
+
+
+// ================= SETUP =================
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("       AgCane Starting");
+  Serial.println("==============================");
+
+  // Motor pins
+  pinMode(MOTOR_LEFT, OUTPUT);
+  pinMode(MOTOR_RIGHT, OUTPUT);
+
+  // Potentiometer
+  pinMode(POT_PIN, INPUT);
+
+  // Push button
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  carStop();
+
+  // RFID
+  SPI.begin();
+  rfid.PCD_Init();
+
+  delay(500);
+
+  Serial.println("RFID Reader Ready");
+
+  // WiFi
+  Serial.println("Connecting to WiFi...");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi Connected!");
+
+  Serial.print("NodeMCU IP: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.println("System Ready");
+  Serial.println("Press button to START");
+  Serial.println("==============================");
+}
+
+
+// ================= LOOP =================
+void loop()
+{
+  // =================================================
+  // PUSH BUTTON
+  // =================================================
+
+  bool buttonState = digitalRead(BUTTON_PIN);
+
+  if (buttonState == LOW && lastButtonState == HIGH)
+  {
+    delay(50);  // debounce
+
+    if (digitalRead(BUTTON_PIN) == LOW)
+    {
+      carRunning = !carRunning;
+
+      if (carRunning)
+      {
+        Serial.println("BUTTON PRESSED");
+        Serial.println("CAR STARTED");
+
+        carForward();
+      }
+      else
+      {
+        Serial.println("BUTTON PRESSED");
+        Serial.println("CAR MANUALLY STOPPED");
+
+        carStop();
+      }
+    }
+  }
+
+  lastButtonState = buttonState;
+
+
+  // =================================================
+  // IF CAR IS NOT RUNNING, DON'T CHECK RFID
+  // =================================================
+
+  if (!carRunning)
+  {
+    return;
+  }
+
+
+  // =================================================
+  // RFID CHECK
+  // =================================================
+
+  if (!rfid.PICC_IsNewCardPresent())
+  {
+    // Keep updating speed from potentiometer
+    carForward();
+    return;
+  }
+
+  if (!rfid.PICC_ReadCardSerial())
+  {
+    return;
+  }
+
+
+  // =================================================
+  // RFID DETECTED
+  // =================================================
+
+  Serial.println();
+  Serial.println("********************************");
+  Serial.println("RFID TAG DETECTED!");
+  Serial.println("********************************");
+
+  String uid = getUID();
+
+  Serial.print("UID: ");
+  Serial.println(uid);
+
+  Serial.print("POINT: ");
+  Serial.println(pointNumber);
+
+
+  // STOP IMMEDIATELY
+  carStop();
+
+  // Send data
+  sendData(uid, pointNumber);
+
+  // Wait at RFID point
+  Serial.println("Waiting 3 seconds...");
+
+  delay(STOP_TIME);
+
+
+  // Move to next point
+  pointNumber++;
+
+  Serial.print("Moving to Point ");
+  Serial.println(pointNumber);
+
+  carRunning = true;
+  carForward();
+
+
+  // Finish RFID reading
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  // Prevent same tag from being detected repeatedly
+  delay(1000);
+}
